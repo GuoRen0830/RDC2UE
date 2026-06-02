@@ -9,10 +9,10 @@ def export_current_draw_callback(ctx, data):
     _log("Export Current Draw clicked")
 
     try:
-        from . import rdc2ue_exporter
-        importlib.reload(rdc2ue_exporter)
+        from . import rdc2ue_exporter_from_output
+        importlib.reload(rdc2ue_exporter_from_output)
 
-        result = rdc2ue_exporter.export_current_draw_from_plugin(ctx)
+        result = rdc2ue_exporter_from_output.export_current_draw_from_plugin(ctx)
         if result is None:
             _log("Export failed")
             return
