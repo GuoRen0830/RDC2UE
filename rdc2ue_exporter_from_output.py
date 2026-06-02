@@ -208,10 +208,10 @@ def write_mesh_bin(bin_path, attributes):
     
     return json_attributes, byte_offset, vertex_count
 
-def write_mesh_json(json_path, bin_path, event_id, draw_name, json_attributes, byte_length, vertex_count):
+def write_mesh_json(json_path, bin_path, event_id, draw_name, index_count, instance_count, instances, json_attributes, byte_length, vertex_count):
     payload = OrderedDict()
 
-    payload["version"] = 4
+    payload["version"] = 5
     payload["source"] = "VS_OUTPUT_WORLD"
     payload["eventId"] = event_id
     payload["drawName"] = draw_name
@@ -223,6 +223,13 @@ def write_mesh_json(json_path, bin_path, event_id, draw_name, json_attributes, b
         ("triangleCount", vertex_count // 3),
     ])
 
+    payload["draw"] = OrderedDict([
+        ("indexCountPerInstance", index_count),
+        ("instanceCount", instance_count),
+    ])
+
+    payload["instances"] = instances
+
     payload["buffer"] = OrderedDict([
         ("uri", os.path.basename(bin_path)),
         ("byteLength", byte_length),
@@ -233,7 +240,7 @@ def write_mesh_json(json_path, bin_path, event_id, draw_name, json_attributes, b
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
-def write_mesh_files(path_prefix, event_id, draw_name, attributes):
+def write_mesh_files(path_prefix, event_id, draw_name, index_count, instance_count, instances, attributes):
     bin_path = path_prefix + ".bin"
     json_path = path_prefix + ".json"
 
@@ -244,6 +251,9 @@ def write_mesh_files(path_prefix, event_id, draw_name, attributes):
         bin_path,
         event_id,
         draw_name,
+        index_count,
+        instance_count,
+        instances,
         json_attributes,
         byte_length,
         vertex_count
@@ -294,21 +304,12 @@ def append_triangle(raw_bytes, vertex_stride, indices, tri_start, order, positio
         uvs.append(uv)
         sv_positions.append(sv_position)
 
-def export_mesh(controller, event_id, output_dir):
-    print("=" * 70)
-    log("开始导出 EventId = {}".format(event_id))
+def append_instance(controller, instance_id, index_count, positions, normals, uvs, sv_positions, instances):
+    vertex_offset = len(positions)
+    triangle_offset = vertex_offset // 3
+    
+    postvs = controller.GetPostVSData(instance_id, 0, rd.MeshDataStage.VSOut)
 
-    # 获取 drawcall
-    draw = get_draw_action(controller, event_id)
-    draw_name = draw.GetName(controller.GetStructuredFile())
-    log("Drawcall: {}".format(draw_name))
-
-    # 读取 pipeline 状态
-    controller.SetFrameEvent(event_id, True)
-
-    postvs = controller.GetPostVSData(0, 0, rd.MeshDataStage.VSOut)
-
-    index_count = draw.numIndices
     vertex_stride = postvs.vertexByteStride
 
     raw_bytes = controller.GetBufferData(
@@ -319,30 +320,68 @@ def export_mesh(controller, event_id, output_dir):
 
     indices = read_postvs_indices(controller, postvs, index_count)
 
-    log("PostVS indexCount={}, vertexStride={}".format(index_count, vertex_stride))
-    log("PostVS vertexRawBytes={}".format(len(raw_bytes)))
-    log("PostVS maxIndex={}".format(max(indices)))
+    log("Instance {}: vertexStride={}, vertexRawBytes={}, maxIndex={}".format(
+        instance_id, vertex_stride, len(raw_bytes), max(indices)
+    ))
+    
+    order = (0, 2, 1) if FLIP_WINDING else (0, 1, 2)
+    triangle_index_count = (index_count // 3) * 3
+
+    for tri_start in range(0, triangle_index_count, 3):
+        append_triangle(
+            raw_bytes, 
+            vertex_stride, 
+            indices, 
+            tri_start, 
+            order, 
+            positions, 
+            normals, 
+            uvs, 
+            sv_positions
+        )
+    
+    vertex_count = len(positions) - vertex_offset
+    
+    instances.append(OrderedDict([
+        ("instanceId", instance_id),
+        ("vertexOffset", vertex_offset),
+        ("vertexCount", vertex_count),          # TODO
+        ("triangleOffset", triangle_offset),
+        ("triangleCount", vertex_count // 3),
+    ]))
+
+def export_mesh(controller, event_id, output_dir):
+    print("=" * 70)
+    log("开始导出 EventId = {}".format(event_id))
+
+    # 获取 drawcall
+    draw = get_draw_action(controller, event_id)
+    draw_name = draw.GetName(controller.GetStructuredFile())
+    log("Drawcall: {}".format(draw_name))
+
+    controller.SetFrameEvent(event_id, True)
+
+    index_count = draw.numIndices
+    instance_count = draw.numInstances
+    log("indexCount={}, instanceCount={}".format(index_count, instance_count))
 
     # 拼装三角形
     positions = []
     normals = []
     uvs = []
     sv_positions = []
+    instances = []
 
-    order = (0, 2, 1) if FLIP_WINDING else (0, 1, 2)
-    triangle_index_count  = (index_count // 3) * 3
-
-    for tri_start in range(0, triangle_index_count, 3):
-        append_triangle(
-            raw_bytes,
-            vertex_stride,
-            indices,
-            tri_start,
-            order,
+    for instance_id in range(instance_count):
+        append_instance(
+            controller,
+            instance_id,
+            index_count,
             positions,
             normals,
             uvs,
-            sv_positions
+            sv_positions,
+            instances
         )
 
     # 导出 mesh 文件
@@ -362,7 +401,15 @@ def export_mesh(controller, event_id, output_dir):
     ])
 
     mesh_prefix = os.path.join(output_dir, "eid_{}".format(event_id))
-    bin_path, json_path = write_mesh_files(mesh_prefix, event_id, draw_name, attributes)
+    bin_path, json_path = write_mesh_files(
+        mesh_prefix,
+        event_id, 
+        draw_name,
+        index_count,
+        instance_count,
+        instances, 
+        attributes
+    )
 
     txt_path = mesh_prefix + ".txt"
     write_debug_txt(txt_path, event_id, draw_name, positions, normals, uvs, sv_positions)
