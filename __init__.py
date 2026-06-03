@@ -9,16 +9,34 @@ def export_current_draw_callback(ctx, data):
     _log("Export Current Draw clicked")
 
     try:
-        from . import rdc2ue_exporter_from_output
-        importlib.reload(rdc2ue_exporter_from_output)
+        from . import rdc2ue_exporter
+        importlib.reload(rdc2ue_exporter)
 
-        result = rdc2ue_exporter_from_output.export_current_draw_from_plugin(ctx)
+        result = rdc2ue_exporter.export_current_draw_from_plugin(ctx)
         if result is None:
             _log("Export failed")
             return
         
     except Exception as e:
         _log("Export failed: {}".format(e))
+
+RANGE_START_EID = 9221
+RANGE_END_EID = 9892
+
+def export_draw_range_callback(ctx, data):
+    _log("Export Draw Range clicked")
+
+    try:
+        from . import rdc2ue_exporter
+        importlib.reload(rdc2ue_exporter)
+
+        result = rdc2ue_exporter.export_draw_range_from_plugin(ctx, RANGE_START_EID, RANGE_END_EID)
+        if result is None:
+            _log("Range export failed")
+            return
+        
+    except Exception as e:
+        _log("Range export failed: {}".format(e))
 
 def register(version, ctx):
     _log("Register RDC2UE plugin for version {}".format(version))
@@ -27,6 +45,12 @@ def register(version, ctx):
         qrd.WindowMenu.Window,
         ["RDC2UE", "Export Current Draw"],
         export_current_draw_callback
+    )
+
+    ctx.Extensions().RegisterWindowMenu(
+        qrd.WindowMenu.Window,
+        ["RDC2UE", "Export Draw Range"],
+        export_draw_range_callback
     )
 
 def unregister():
