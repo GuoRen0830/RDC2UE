@@ -9,6 +9,54 @@ from collections import OrderedDict
 
 import renderdoc as rd
 
+# ==================== 全局配置 ====================
+
+RANGE_START_EID = 178
+RANGE_END_EID = 1220
+
+DEFAULT_OUTPUT_DIR = r"F:\RDC2UE\ExportResults"
+
+EXPORT_PROFILE = "mobile" # "pc" | "mobile"
+
+# VS Output layout
+if EXPORT_PROFILE == "pc":
+    # slot0: SV_POSITION.xyzw
+    # slot1: TEXCOORD10.xyzw   -> Tangent.xyz + Handedness
+    # slot2: TEXCOORD11.xyzw   -> Normal.xyz
+    # slot3: COLOR.xyzw
+    # slot4: TEXCOORD0.xyzw    -> UV0.xy
+    VSOUT_SLOT_SV_POSITION = 0
+    VSOUT_SLOT_TANGENT     = 1
+    VSOUT_SLOT_NORMAL      = 2
+    VSOUT_SLOT_UV0         = 4
+
+elif EXPORT_PROFILE == "mobile":
+    # mobile 端仅 slot 0 有效
+    # slot 0: SV_Position
+    VSOUT_SLOT_SV_POSITION = 0
+    VSOUT_SLOT_TANGENT     = 1
+    VSOUT_SLOT_NORMAL      = 2
+    VSOUT_SLOT_UV0         = 3
+
+# 需人工记录 ViewProjection 矩阵
+# pc cb1[8-11]
+#VIEW_PROJ = [
+#    [0.98146,   0.00537,   0.0,        0.19162],
+#    [0.19164,  -0.02735,   0.0,       -0.98135],
+#    [-0.00001,  1.77765,   0.0,       -0.01555],
+#    [0.0,       0.0,       1.0,        0.0],
+#]
+
+# mobile vu_h[7-10]
+VIEW_PROJ = [
+    [0.01399,  -0.27182,   0.0,      -0.04767],
+    [0.08591,   0.04426,   0.0,      -0.29278],
+    [0.57622,   0.0,       0.0,       0.04481],
+    [0.0,       0.0,       1.0,       0.0],
+]
+
+FLIP_WINDING = False
+
 # ==================== 日志函数 ====================
 def log(message):
     print("[RDC2UE] {}".format(message))
@@ -25,32 +73,6 @@ def error(message):
 def print_exception(prefix="Exception"):
     error(prefix)
     print(traceback.format_exc())
-
-# ==================== 全局配置 ====================
-
-DEFAULT_OUTPUT_DIR = r"F:\RDC2UE\ExportResults"
-
-# 人工记录 ViewProjection 矩阵
-# cb1[8-11]
-VIEW_PROJ = [
-    [0.98146,   0.00537,   0.0,        0.19162],
-    [0.19164,  -0.02735,   0.0,       -0.98135],
-    [-0.00001,  1.77765,   0.0,       -0.01555],
-    [0.0,       0.0,       1.0,        0.0],
-]
-
-# VS Output
-# SV_POSITION.xyzw
-# TEXCOORD10.xyzw   -> Tangent.xyz + Handedness
-# TEXCOORD11.xyzw   -> Normal.xyz
-# COLOR.xyzw
-# TEXCOORD0.xyzw    -> UV0.xy
-VSOUT_SLOT_SV_POSITION = 0
-VSOUT_SLOT_TANGENT     = 1
-VSOUT_SLOT_NORMAL      = 2
-VSOUT_SLOT_UV0         = 4
-
-FLIP_WINDING = False
 
 # ==================== Drawcall 查找 ================
 
@@ -132,12 +154,15 @@ def mul_mat4_vec4(m, v):
 
 def clip_to_world(clip_pos):
     world_h = mul_mat4_vec4(INV_VIEW_PROJ, clip_pos)
-
-    if world_h[3] == 0.0:
-        return world_h[:3]
     
     inv_w = 1.0 / world_h[3]
-    return (world_h[0] * inv_w, world_h[1] * inv_w, world_h[2] * inv_w)
+    position = (
+        world_h[0] * inv_w,
+        world_h[1] * inv_w,
+        world_h[2] * inv_w
+    )
+
+    return position
 
 def normalize3(v):
     x, y, z = v
@@ -427,7 +452,7 @@ def export_mesh_range(controller, start_eid, end_eid, output_dir):
 
 # ==================== 插件入口 ====================
 
-def export_draw_range_from_plugin(ctx, start_eid, end_eid, output_dir=DEFAULT_OUTPUT_DIR):
+def export_draw_range_from_plugin(ctx, start_eid = RANGE_START_EID, end_eid = RANGE_END_EID, output_dir=DEFAULT_OUTPUT_DIR):
     """批量导出入口函数"""
     os.makedirs(output_dir, exist_ok=True)
 
