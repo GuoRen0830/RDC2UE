@@ -51,7 +51,6 @@ VSOUT_SLOT_NORMAL      = 2
 VSOUT_SLOT_UV0         = 4
 
 FLIP_WINDING = False
-WRITE_DEBUG_TXT = False
 
 # ==================== Drawcall 查找 ================
 
@@ -267,31 +266,6 @@ def write_scene_json(scene_path, mesh_results):
     with open(scene_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
-def write_debug_txt(txt_path, event_id, positions, normals, uvs):
-    vertex_count = len(positions)
-
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write("# EventId = {}\n".format(event_id))
-        f.write("# VertexCount = {}\n".format(vertex_count))
-        f.write("# Columns: i, POSITION.xyz, NORMAL.xyz, UV.xy\n")
-
-        for i in range(vertex_count):
-            p = positions[i]
-            n = normals[i]
-            uv = uvs[i]
-
-            f.write(
-                "{}, "
-                "{:.6f}, {:.6f}, {:.6f}, "
-                "{:.6f}, {:.6f}, {:.6f}, "
-                "{:.6f}, {:.6f}\n".format(
-                    i,
-                    p[0], p[1], p[2],
-                    n[0], n[1], n[2],
-                    uv[0], uv[1],
-                )
-            )
-
 # ==================== 组装顶点数据 ==================== 
 
 def append_triangle(raw_bytes, vertex_stride, indices, tri_start, order, positions, normals, uvs):
@@ -402,12 +376,6 @@ def export_mesh(controller, event_id, output_dir):
         attributes
     )
 
-    txt_path = None
-    if WRITE_DEBUG_TXT:
-        txt_path = mesh_prefix + ".txt"
-        write_debug_txt(txt_path, event_id, positions, normals, uvs)
-        log("调试 TXT 已写入: {}".format(txt_path))
-
     return {
         "eventId": event_id,
         "vertexCount": len(positions),
@@ -418,7 +386,10 @@ def export_mesh(controller, event_id, output_dir):
 
 def export_mesh_range(controller, start_eid, end_eid, output_dir):
     range_output_dir = os.path.join(output_dir, "range_{}_{}".format(start_eid, end_eid))
+    meshes_output_dir = os.path.join(range_output_dir, "meshes")
+
     os.makedirs(range_output_dir, exist_ok=True)
+    os.makedirs(meshes_output_dir, exist_ok=True)
 
     draws = get_draw_actions(controller, start_eid, end_eid)
     log("导出范围: {}-{}，共 {} 个 drawcall".format(start_eid, end_eid, len(draws)))
@@ -430,7 +401,7 @@ def export_mesh_range(controller, start_eid, end_eid, output_dir):
         event_id = draw.eventId
 
         try:
-            result = export_mesh(controller, event_id, range_output_dir)
+            result = export_mesh(controller, event_id, meshes_output_dir)
             results.append(result)
         
         except Exception as e:
@@ -455,31 +426,6 @@ def export_mesh_range(controller, start_eid, end_eid, output_dir):
     }
 
 # ==================== 插件入口 ====================
-
-def export_current_draw_from_plugin(ctx, output_dir=DEFAULT_OUTPUT_DIR):
-    """单次导出入口函数"""
-    os.makedirs(output_dir, exist_ok=True)
-    
-    event_id = ctx.CurEvent()
-    if event_id == 0:
-        log("当前没有选中有效 event")
-        return None
-    
-    log("插件入口，准备导出当前 drawcall")
-    log("当前 event id: {}".format(event_id))
-    log("输出目录: {}".format(output_dir))
-
-    result_holder = {"result": None}
-
-    def replay_task(controller):
-        result_holder["result"] = export_mesh(controller, event_id, output_dir)
-    
-    try:
-        ctx.Replay().BlockInvoke(replay_task)
-    except Exception:
-        print_exception("导出失败")
-
-    return result_holder["result"]
 
 def export_draw_range_from_plugin(ctx, start_eid, end_eid, output_dir=DEFAULT_OUTPUT_DIR):
     """批量导出入口函数"""

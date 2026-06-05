@@ -4,24 +4,8 @@ import qrenderdoc as qrd
 def _log(msg):
     print("[RDC2UE]" + msg)
 
-def export_current_draw_callback(ctx, data):
-    """菜单按钮回调函数"""
-    _log("Export Current Draw clicked")
-
-    try:
-        from . import rdc2ue_exporter
-        importlib.reload(rdc2ue_exporter)
-
-        result = rdc2ue_exporter.export_current_draw_from_plugin(ctx)
-        if result is None:
-            _log("Export failed")
-            return
-        
-    except Exception as e:
-        _log("Export failed: {}".format(e))
-
-RANGE_START_EID = 7890
-RANGE_END_EID = 13075
+RANGE_START_EID = 7936
+RANGE_END_EID = 8476
 
 def export_draw_range_callback(ctx, data):
     _log("Export Draw Range clicked")
@@ -39,13 +23,7 @@ def export_draw_range_callback(ctx, data):
         _log("Range export failed: {}".format(e))
 
 def register(version, ctx):
-    _log("Register RDC2UE plugin for version {}".format(version))
-
-    ctx.Extensions().RegisterWindowMenu(
-        qrd.WindowMenu.Window,
-        ["RDC2UE", "Export Current Draw"],
-        export_current_draw_callback
-    )
+    _log("Register RDC2UE plugin")
 
     ctx.Extensions().RegisterWindowMenu(
         qrd.WindowMenu.Window,
