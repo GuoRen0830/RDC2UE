@@ -11,8 +11,11 @@ import renderdoc as rd
 
 # ==================== 全局配置 ====================
 
+#RANGE_START_EID = 7890
+#RANGE_END_EID = 13075
+
 RANGE_START_EID = 7890
-RANGE_END_EID = 13075
+RANGE_END_EID = 8000
 
 DEFAULT_OUTPUT_DIR = r"F:\RDC2UE\ExportResults"
 
@@ -255,6 +258,77 @@ def append_instance(controller, instance_id, index_count, positions, tangents, b
 
 # ==================== 写文件 ====================
 
+def make_rel_path(path, base_dir):
+    rel_path = os.path.relpath(path, base_dir)
+    rel_path = rel_path.replace("\\", "/")
+    return rel_path
+
+def make_texture_filename(texture_id):
+    texture_id_text = str(texture_id)
+    texture_id_text = texture_id_text.replace("ResourceId::", "")
+    return "tex_{}.png".format(texture_id_text)
+
+def save_texture(controller, texture_id, texture_path):
+    if os.path.exists(texture_path):
+        return True
+    
+    os.makedirs(os.path.dirname(texture_path), exist_ok=True)
+
+    texsave = rd.TextureSave()
+
+    texsave.resourceId = texture_id
+    texsave.mip = 0
+    texsave.slice.sliceIndex = 0
+    texsave.alpha = rd.AlphaMapping.Preserve
+    texsave.destType = rd.FileType.PNG
+
+    controller.SaveTexture(texsave, texture_path)
+
+    return True
+
+def collect_all_texture_ids(controller):
+    texture_ids = set()
+
+    textures = controller.GetTextures()
+    for texture in textures:
+        texture_ids.add(str(texture.resourceId))
+    
+    return texture_ids
+
+def collect_texture_bindings(controller, material_json_path, textures_output_dir, all_texture_ids):
+    material_dir = os.path.dirname(material_json_path)
+
+    pipe = controller.GetPipelineState()
+    ps_resources = pipe.GetReadOnlyResources(rd.ShaderStage.Pixel)
+
+    texture_bindings = []
+    used = set()
+
+    for slot, used_descriptor in enumerate(ps_resources):
+        texture_id = used_descriptor.descriptor.resource
+        
+        texture_id_text = str(texture_id)
+        if texture_id_text not in all_texture_ids:
+            continue
+        
+        key = (slot, texture_id_text)
+        if key in used:
+            continue
+        used.add(key)
+
+        texture_filename = make_texture_filename(texture_id)
+        texture_path = os.path.join(textures_output_dir, texture_filename)
+
+        save_texture(controller, texture_id, texture_path)
+
+        texture_bindings.append(OrderedDict([
+            ("slot", slot),
+            ("texture", make_rel_path(texture_path, material_dir)),
+        ]))
+    
+    return texture_bindings
+    
+
 def write_mesh_bin(bin_path, attributes):
     first_attr_name = next(iter(attributes))
     vertex_count = len(attributes[first_attr_name]["data"])
@@ -319,18 +393,30 @@ def write_mesh_files(path_prefix, event_id, instances, attributes):
 
     return bin_path, json_path
 
+def write_material_json(material_json_path, texture_bindings):
+    payload = OrderedDict()
+
+    payload["textures"] = texture_bindings
+
+    with open(material_json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
 def write_scene_json(scene_path, mesh_results):
     scene_dir = os.path.dirname(scene_path)
 
-    mesh_files = []
+    draws = []
+
     for result in mesh_results:
         mesh_json_path = result["jsonPath"]
-        rel_path = os.path.relpath(mesh_json_path, scene_dir)
-        rel_path = rel_path.replace("\\", "/")
-        mesh_files.append(rel_path)
+        material_json_path = result["materialJsonPath"]
+
+        draws.append(OrderedDict([
+            ("mesh", make_rel_path(mesh_json_path, scene_dir)),
+            ("material", make_rel_path(material_json_path, scene_dir)),
+        ]))
     
     payload = OrderedDict()
-    payload["meshes"] = mesh_files
+    payload["draws"] = draws
 
     with open(scene_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -399,7 +485,7 @@ def export_mesh(controller, event_id, output_dir):
         }),
     ])
 
-    mesh_prefix = os.path.join(output_dir, "eid_{}".format(event_id))
+    mesh_prefix = os.path.join(output_dir, "mesh_eid_{}".format(event_id))
     bin_path, json_path = write_mesh_files(
         mesh_prefix,
         event_id, 
@@ -416,14 +502,21 @@ def export_mesh(controller, event_id, output_dir):
     }
 
 def export_mesh_range(controller, start_eid, end_eid, output_dir):
+    # 输出目录
     range_output_dir = os.path.join(output_dir, "range_{}_{}".format(start_eid, end_eid))
     meshes_output_dir = os.path.join(range_output_dir, "meshes")
+    materials_output_dir = os.path.join(range_output_dir, "materials")
+    textures_output_dir = os.path.join(range_output_dir, "textures")
 
     os.makedirs(range_output_dir, exist_ok=True)
     os.makedirs(meshes_output_dir, exist_ok=True)
+    os.makedirs(materials_output_dir, exist_ok=True)
+    os.makedirs(textures_output_dir, exist_ok=True)
 
     draws = get_draw_actions(controller, start_eid, end_eid)
     log("导出范围: {}-{}，共 {} 个 drawcall".format(start_eid, end_eid, len(draws)))
+
+    all_texture_ids = collect_all_texture_ids(controller)
 
     results = []
     failed = []
@@ -432,7 +525,27 @@ def export_mesh_range(controller, start_eid, end_eid, output_dir):
         event_id = draw.eventId
 
         try:
+            # 导出 mesh 文件
             result = export_mesh(controller, event_id, meshes_output_dir)
+
+            # 导出材质文件
+            material_json_path = os.path.join(
+                materials_output_dir,
+                "mat_eid_{}.json".format(event_id)
+            )
+
+            controller.SetFrameEvent(event_id, True)
+
+            texture_bindings = collect_texture_bindings(
+                controller,
+                material_json_path,
+                textures_output_dir,
+                all_texture_ids
+            )
+
+            write_material_json(material_json_path, texture_bindings)
+            result["materialJsonPath"] = material_json_path
+
             results.append(result)
         
         except Exception as e:
