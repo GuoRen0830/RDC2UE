@@ -11,7 +11,7 @@ def export_draw_range_callback(ctx, data):
         from . import rdc2ue_exporter
         importlib.reload(rdc2ue_exporter)
 
-        result = rdc2ue_exporter.export_draw_range_from_plugin(ctx)
+        result = rdc2ue_exporter.export_from_plugin(ctx)
         if result is None:
             _log("Range export failed")
             return
