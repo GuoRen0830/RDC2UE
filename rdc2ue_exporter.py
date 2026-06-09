@@ -140,7 +140,7 @@ def make_texture_filename(texture_id):
     texture_id_text = str(texture_id)
     texture_id_text = texture_id_text.replace("ResourceId::", "")
 
-    return "tex_{}.png".format(texture_id_text)
+    return "T_{}.png".format(texture_id_text)
 
 
 def make_texture_path(paths, texture_id):
