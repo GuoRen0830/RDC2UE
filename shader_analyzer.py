@@ -100,7 +100,7 @@ def parse_instruction(code):
 
 
 # ============================================================
-# 寄存器分量工具
+# 寄存器工具
 # ============================================================
 
 def clean_token(token):
@@ -156,6 +156,34 @@ def expand_src_components(token, count):
         result.append(reg + "." + c)
 
     return result
+
+
+def get_register_name(token):
+    """从 r3.xy / -r3.xyz / abs(r3.x) 中取出 r3"""
+    token = clean_token(token)
+
+    match = re.match(r"(r\d+|o\d+|v\d+)(?:\.|$)", token)
+    if not match:
+        return None
+    
+    return match.group(1)
+
+
+def instruction_uses_register(inst, reg):
+    """判断一条指令的源参数里是否使用了某个寄存器"""
+    if reg is None:
+        return False
+    
+    if len(inst["args"]) < 2:
+        return False
+    
+    for arg in inst["args"][1:]:
+        used_reg = get_register_name(arg)
+
+        if used_reg == reg:
+            return True
+    
+    return False
 
 
 # ============================================================
@@ -279,16 +307,18 @@ def collect_source_deps(src_args, dst_count, reg_deps):
     return deps
 
 
-def process_sample_instruction(inst, reg_deps, coord_type, tex_uv_type):
+def process_sample_instruction(idx, inst, reg_deps, coord_type, tex_uv_type, sample_records):
     """
     处理 sample 指令
     1. 记录 dst 的 texture 依赖
     2. 记录 texture 的 UV 类型
+    3. 记录 sample 事件，后续判断 texture role
     """
     if len(inst["args"]) < 3:
         return
     
     dst = inst["args"][0]
+    uv_arg = inst["args"][1]
     slot = find_texture_slot(inst["args"])
 
     if slot is None:
@@ -301,6 +331,16 @@ def process_sample_instruction(inst, reg_deps, coord_type, tex_uv_type):
     # 记录该 texture 的 UV 类型
     uv_type = get_sample_uv_type(inst, coord_type)
     record_texture_uv_type(slot, uv_type, tex_uv_type)
+
+    # 记录 sample 事件
+    sample_records.append({
+        "line": idx,
+        "op": inst["op"],
+        "slot": slot,
+        "dst": dst,
+        "uv_arg": uv_arg,
+        "uv_type": uv_type,
+    })
 
 
 def process_propagate_instruction(inst, reg_deps):
@@ -327,12 +367,13 @@ def process_propagate_instruction(inst, reg_deps):
 # ============================================================
 
 def analyze_instructions(instructions):
-    """顺序扫描指令，得到 texture 依赖和每个 texture 的 UV 类型"""
+    """顺序扫描指令"""
     reg_deps = {}
     coord_type = init_coord_type()
     tex_uv_type = {}
+    sample_records = []
 
-    for _idx, code in instructions:
+    for idx, code in instructions:
         inst = parse_instruction(code)
         if inst is None:
             continue
@@ -340,15 +381,22 @@ def analyze_instructions(instructions):
         process_coord_instruction(inst, coord_type)
 
         if inst["op"].startswith("sample"):
-            process_sample_instruction(inst, reg_deps, coord_type, tex_uv_type)
+            process_sample_instruction(
+                idx,
+                inst,
+                reg_deps,
+                coord_type,
+                tex_uv_type,
+                sample_records
+            )
         elif inst["op"] in PROPAGATE_OPS:
             process_propagate_instruction(inst, reg_deps)
 
-    return reg_deps, coord_type, tex_uv_type
+    return reg_deps, coord_type, tex_uv_type, sample_records
 
 
 def collect_output_deps(reg_deps):
-    """收集最终 GBuffer 输出的依赖"""
+    """收集最终 GBuffer 输出的 texture 依赖"""
     output_deps = {}
 
     for semantic, outputs in GBUFFER_OUTPUTS.items():
@@ -360,6 +408,121 @@ def collect_output_deps(reg_deps):
         output_deps[semantic] = deps
 
     return output_deps
+
+
+def get_or_create_slot_info(slot_infos, slot):
+    """获取一个 texture slot 的汇总信息"""
+    if slot not in slot_infos:
+        slot_infos[slot] = {
+            "sample_count": 0,
+            "uv_types": set(),
+            "sample_dsts": [],
+            "outputs": set(),
+
+            "is_normal_like": False,
+            "normal_evidence": [],
+        }
+    
+    return slot_infos[slot]
+
+
+def build_slot_infos(sample_records, output_deps):
+    """构建 texture slot 的汇总信息"""
+    slot_infos = {}
+
+    # 从 sample_records 汇总采样信息
+    for record in sample_records:
+        slot = record["slot"]
+        info = get_or_create_slot_info(slot_infos, slot)
+
+        info["sample_count"] += 1
+        info["uv_types"].add(record["uv_type"])
+
+        if record["dst"] not in info["sample_dsts"]:
+            info["sample_dsts"].append(record["dst"])
+    
+    # 从 output_deps 反查每个 slot 影响的输出
+    for semantic, deps in output_deps.items():
+        for slot in deps:
+            info = get_or_create_slot_info(slot_infos, slot)
+            info["outputs"].add(semantic)
+
+    # set 转为 list
+    for info in slot_infos.values():
+        info["uv_types"] = sorted(info["uv_types"])
+        info["outputs"] = sorted(info["outputs"])
+    
+    return slot_infos
+
+
+def detect_normal_like_for_sample(record, instructions, window_size=7):
+    """
+    检测一次 sample 是否像 normal
+        第一次 remap 必须用 sample dst register
+        后续在小窗口内按顺序找 dp2/dp3 和 sqrt/rsq
+    """
+    sample_line = record["line"]
+    sample_reg = get_register_name(record["dst"])
+
+    stage = 0
+    evidence = []
+
+    for idx, code in instructions:
+        if idx <= sample_line:
+            continue
+            
+        if idx > sample_line + window_size:
+            break
+
+        inst = parse_instruction(code)
+        if inst is None:
+            continue
+
+        op = inst["op"]
+
+        # stage 0: 等待 normal remap
+        # 必须用 sample dst register
+        if stage == 0:
+            if op in ("mad", "mad_sat", "mul", "mul_sat", "add"):
+                if not instruction_uses_register(inst, sample_reg):
+                    continue
+
+                stage = 1
+                evidence.append("line {}: remap op {}".format(idx, op))
+            continue
+
+        # stage 1: 等待长度计算
+        if stage == 1:
+            if op in ("dp2", "dp3"):
+                stage = 2
+                evidence.append("line {}: vector length op {}".format(idx, op))
+            continue
+        
+        # stage 2: 等待 z 重建 / normalize
+        if stage == 2:
+            if op in ("sqrt", "rsq"):
+                stage = 3
+                evidence.append("line {}: reconstruct op {}".format(idx, op))
+                break
+    
+    is_normal_like = stage == 3
+
+    return is_normal_like, evidence
+
+
+def detect_normal_like_slots(slot_infos, sample_records, instructions):
+    """检测每个 texture slot 是否像 normal"""
+    for record in sample_records:
+        slot = record["slot"]
+
+        is_normal_like, evidence = detect_normal_like_for_sample(record, instructions)
+
+        if not is_normal_like:
+            continue
+        
+        info = get_or_create_slot_info(slot_infos, slot)
+        info["is_normal_like"] = True
+        info["normal_evidence"].extend(evidence)
 
 
 def choose_mesh_uv_slot(deps, tex_uv_type):
@@ -389,6 +552,15 @@ def classify_material_slots(output_deps, tex_uv_type):
 # ============================================================
 # Debug 打印
 # ============================================================
+
+def texture_slot_sort_key(slot):
+    match = re.match(r"t(\d+)$", slot)
+
+    if match:
+        return int(match.group(1))
+    
+    return 9999
+
 
 def print_reg_deps(reg_deps):
     """打印当前所有寄存器分量的 texture 依赖"""
@@ -436,6 +608,38 @@ def print_material_slots(slots):
             print("  {}: {}".format(semantic, slot))
 
 
+def print_sample_records(sample_records):
+    """打印所有 sample 事件"""
+    print("Sample records:")
+
+    for record in sample_records:
+        print(
+            "  line {}: {} <- {}, uv={}, uv_type={}".format(
+                record["line"],
+                record["dst"],
+                record["slot"],
+                record["uv_arg"],
+                record["uv_type"]
+            )
+        )
+
+
+def print_slot_infos(slot_infos):
+    """打印每个 texture slot 的汇总信息"""
+    print("Slot infos:")
+
+    for slot in sorted(slot_infos.keys(), key=texture_slot_sort_key):
+        info = slot_infos[slot]
+
+        print("  {}:".format(slot))
+        print("    sample_count: {}".format(info["sample_count"]))
+        print("    uv_types: {}".format(info["uv_types"]))
+        print("    sample_dsts: {}".format(info["sample_dsts"]))
+        print("    outputs: {}".format(info["outputs"]))
+        print("    is_normal_like: {}".format(info["is_normal_like"]))
+        print("    normal_evidence: {}".format(info["normal_evidence"]))
+
+
 # ============================================================
 # 命令行入口
 # ============================================================
@@ -450,18 +654,26 @@ def main():
     lines = read_shader_lines(path)
     instructions = extract_instruction_lines(lines)
 
-    reg_deps, coord_type, tex_uv_type = analyze_instructions(instructions)
+    reg_deps, coord_type, tex_uv_type, sample_records = analyze_instructions(instructions)
     output_deps = collect_output_deps(reg_deps)
+    slot_infos = build_slot_infos(sample_records, output_deps)
+    detect_normal_like_slots(slot_infos, sample_records, instructions)
     slots = classify_material_slots(output_deps, tex_uv_type)
 
-    print()
-    print_reg_deps(reg_deps)
+    #print()
+    #print_reg_deps(reg_deps)
     
-    print()
-    print_coord_type(coord_type)
+    #print()
+    #print_coord_type(coord_type)
     
+    #print()
+    #print_tex_uv_type(tex_uv_type)
+
+    #print()
+    #print_sample_records(sample_records)
+
     print()
-    print_tex_uv_type(tex_uv_type)
+    print_slot_infos(slot_infos)
     
     print()
     print_output_deps(output_deps)
